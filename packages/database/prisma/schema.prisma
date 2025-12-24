@@ -1,0 +1,1640 @@
+// =============================================================================
+// WMS Platform - Prisma Schema
+// =============================================================================
+// Basiert auf dem SQL-Schema, optimiert für Prisma/TypeScript
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema", "postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [uuid_ossp(map: "uuid-ossp")]
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+enum SubscriptionStatus {
+  active
+  trialing
+  past_due
+  cancelled
+  paused
+}
+
+enum TenantStatus {
+  active
+  suspended
+  pending
+  cancelled
+}
+
+enum UserRole {
+  owner
+  admin
+  manager
+  user
+  viewer
+  packer
+  picker
+}
+
+enum PlatformUserRole {
+  super_admin
+  admin
+  support
+  finance
+  developer
+}
+
+enum ZoneType {
+  general
+  bulk
+  pick_face
+  receiving
+  shipping
+  returns
+  quarantine
+  cold
+  hazmat
+  high_value
+}
+
+enum LocationType {
+  shelf
+  bin
+  pallet
+  floor
+  rack
+  drawer
+  cold
+  freezer
+}
+
+enum BarcodeType {
+  ean13
+  upc
+  internal
+  manufacturer
+  custom
+}
+
+enum InventoryStatus {
+  available
+  reserved
+  quarantine
+  damaged
+  expired
+}
+
+enum TransactionType {
+  receive
+  pick
+  pack
+  ship
+  return_receive
+  return_restock
+  transfer
+  adjust_in
+  adjust_out
+  cycle_count
+  damage
+  expire
+  dispose
+  kit
+  unkit
+}
+
+enum OrderStatus {
+  pending
+  processing
+  on_hold
+  exception
+  picking
+  picked
+  packing
+  packed
+  labeled
+  shipped
+  delivered
+  cancelled
+  returned
+}
+
+enum OrderChannel {
+  manual
+  shopify
+  woocommerce
+  api
+  b2b
+  marketplace
+}
+
+enum WroStatus {
+  draft
+  submitted
+  awaiting
+  partially_arrived
+  arrived
+  processing
+  completed
+  cancelled
+  on_hold
+}
+
+enum ReturnStatus {
+  requested
+  approved
+  shipped
+  in_transit
+  arrived
+  processing
+  completed
+  rejected
+  cancelled
+}
+
+enum ReturnAction {
+  restock
+  quarantine
+  dispose
+}
+
+enum ConversationType {
+  general
+  order
+  return_
+  wro
+  product
+  billing
+  technical
+}
+
+enum ConversationStatus {
+  open
+  pending
+  waiting_customer
+  resolved
+  closed
+}
+
+enum PickTaskStatus {
+  pending
+  assigned
+  in_progress
+  completed
+  skipped
+  short
+}
+
+// =============================================================================
+// PLATFORM (Above Tenants)
+// =============================================================================
+
+model SubscriptionPlan {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @db.VarChar(100)
+  slug        String   @unique @db.VarChar(50)
+  description String?
+  
+  priceMonthly  Int     @default(0) @map("price_monthly_cents")
+  priceYearly   Int     @default(0) @map("price_yearly_cents")
+  currency      String  @default("CHF") @db.VarChar(3)
+  
+  // Limits
+  maxOrders     Int?    @map("max_orders_per_month")
+  maxProducts   Int?    @map("max_products")
+  maxUsers      Int?    @map("max_users")
+  maxWarehouses Int?    @map("max_warehouses")
+  maxStorage    Int?    @map("max_storage_gb")
+  
+  trialDays     Int     @default(14) @map("trial_days")
+  isActive      Boolean @default(true) @map("is_active")
+  sortOrder     Int     @default(0) @map("sort_order")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  subscriptions TenantSubscription[]
+  features      PlanFeature[]
+  
+  @@map("subscription_plans")
+}
+
+model FeatureFlag {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique @db.VarChar(50)
+  name        String  @db.VarChar(100)
+  description String?
+  category    String  @default("general") @db.VarChar(50)
+  
+  // plan_feature = included in plans, tenant_setting = tenant can enable
+  flagType    String  @default("plan_feature") @map("flag_type") @db.VarChar(20)
+  isEnabled   Boolean @default(true) @map("is_enabled")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  planFeatures    PlanFeature[]
+  tenantOverrides TenantFeatureOverride[]
+  
+  @@map("feature_flags")
+}
+
+model PlanFeature {
+  id        String  @id @default(uuid()) @db.Uuid
+  planId    String  @map("plan_id") @db.Uuid
+  featureId String  @map("feature_id") @db.Uuid
+  
+  // Override values for this plan
+  limitValue Int? @map("limit_value")
+  
+  plan    SubscriptionPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  feature FeatureFlag      @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  
+  @@unique([planId, featureId])
+  @@map("plan_features")
+}
+
+model PlatformUser {
+  id        String           @id @default(uuid()) @db.Uuid
+  email     String           @unique @db.VarChar(255)
+  password  String           @map("password_hash") @db.VarChar(255)
+  firstName String           @map("first_name") @db.VarChar(100)
+  lastName  String           @map("last_name") @db.VarChar(100)
+  role      PlatformUserRole @default(support)
+  isActive  Boolean          @default(true) @map("is_active")
+  
+  lastLoginAt DateTime? @map("last_login_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  
+  managedTenants  Tenant[]       @relation("CSMRelation")
+  conversations   Conversation[]
+  messages        Message[]
+  
+  @@map("platform_users")
+}
+
+// =============================================================================
+// TENANTS & USERS
+// =============================================================================
+
+model Tenant {
+  id           String       @id @default(uuid()) @db.Uuid
+  name         String       @db.VarChar(255)
+  slug         String       @unique @db.VarChar(100)
+  status       TenantStatus @default(pending)
+  
+  contactEmail String  @map("contact_email") @db.VarChar(255)
+  contactPhone String? @map("contact_phone") @db.VarChar(50)
+  
+  companyName    String? @map("company_name") @db.VarChar(255)
+  vatNumber      String? @map("vat_number") @db.VarChar(50)
+  addressLine1   String? @map("address_line1") @db.VarChar(255)
+  addressLine2   String? @map("address_line2") @db.VarChar(255)
+  postalCode     String? @map("postal_code") @db.VarChar(20)
+  city           String? @db.VarChar(100)
+  countryCode    String  @default("CH") @map("country_code") @db.Char(2)
+  
+  csmId String? @map("csm_id") @db.Uuid
+  csm   PlatformUser? @relation("CSMRelation", fields: [csmId], references: [id])
+  
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+  
+  // Relations
+  settings         TenantSettings?
+  subscription     TenantSubscription?
+  branding         TenantBranding?
+  users            TenantUser[]
+  featureOverrides TenantFeatureOverride[]
+  warehouses       Warehouse[]
+  products         Product[]
+  customers        Customer[]
+  orders           Order[]
+  returns          Return[]
+  wros             WarehouseReceivingOrder[]
+  conversations    Conversation[]
+  apiKeys          ApiKey[]
+  webhooks         WebhookSubscription[]
+  integrations     Integration[]
+  shippingMappings ShippingMethodMapping[]
+  auditLogs        AuditLog[]
+  invitations      Invitation[]
+  
+  @@map("tenants")
+}
+
+model TenantSettings {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @unique @map("tenant_id") @db.Uuid
+  
+  timezone String @default("Europe/Zurich") @db.VarChar(50)
+  currency String @default("CHF") @db.VarChar(3)
+  language String @default("de") @db.VarChar(10)
+  
+  // Feature Toggles (dein Requirement!)
+  lotTrackingEnabled    Boolean @default(false) @map("lot_tracking_enabled")
+  expiryTrackingEnabled Boolean @default(false) @map("expiry_tracking_enabled")
+  serialTrackingEnabled Boolean @default(false) @map("serial_tracking_enabled")
+  hazmatHandlingEnabled Boolean @default(false) @map("hazmat_handling_enabled")
+  
+  // Picking Strategy
+  pickingStrategy String @default("FIFO") @map("picking_strategy") @db.VarChar(20)
+  
+  // Return Defaults
+  defaultReturnAction   ReturnAction @default(restock) @map("default_return_action")
+  autoApproveReturns    Boolean      @default(false) @map("auto_approve_returns")
+  returnWindowDays      Int          @default(30) @map("return_window_days")
+  
+  // Order Settings
+  autoAllocateOrders    Boolean @default(true) @map("auto_allocate_orders")
+  autoReleaseOrders     Boolean @default(false) @map("auto_release_orders")
+  orderNumberPrefix     String  @default("ORD") @map("order_number_prefix") @db.VarChar(10)
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+
+  @@map("tenant_settings")
+}
+
+model TenantSubscription {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @unique @map("tenant_id") @db.Uuid
+  planId   String @map("plan_id") @db.Uuid
+  
+  status            SubscriptionStatus @default(trialing)
+  billingCycle      String             @default("monthly") @map("billing_cycle") @db.VarChar(20)
+  
+  currentPeriodStart DateTime  @map("current_period_start")
+  currentPeriodEnd   DateTime  @map("current_period_end")
+  trialEndsAt        DateTime? @map("trial_ends_at")
+  cancelledAt        DateTime? @map("cancelled_at")
+  
+  stripeCustomerId     String? @map("stripe_customer_id") @db.VarChar(100)
+  stripeSubscriptionId String? @map("stripe_subscription_id") @db.VarChar(100)
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan   SubscriptionPlan @relation(fields: [planId], references: [id])
+  
+  @@map("tenant_subscriptions")
+}
+
+model TenantBranding {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @unique @map("tenant_id") @db.Uuid
+  
+  logoUrl        String? @map("logo_url") @db.VarChar(500)
+  faviconUrl     String? @map("favicon_url") @db.VarChar(500)
+  primaryColor   String  @default("#0066CC") @map("primary_color") @db.VarChar(20)
+  secondaryColor String  @default("#4A5568") @map("secondary_color") @db.VarChar(20)
+  
+  customDomain   String? @map("custom_domain") @db.VarChar(255)
+  emailFromName  String? @map("email_from_name") @db.VarChar(100)
+  emailFromEmail String? @map("email_from_email") @db.VarChar(255)
+  
+  showPoweredBy Boolean @default(true) @map("show_powered_by")
+  
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  @@map("tenant_branding")
+}
+
+model TenantFeatureOverride {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @map("tenant_id") @db.Uuid
+  featureId String @map("feature_id") @db.Uuid
+  
+  isEnabled  Boolean   @default(true) @map("is_enabled")
+  limitValue Int?      @map("limit_value")
+  expiresAt  DateTime? @map("expires_at")
+  reason     String?
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  tenant  Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  feature FeatureFlag @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  
+  @@unique([tenantId, featureId])
+  @@map("tenant_feature_overrides")
+}
+
+model TenantUser {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  email     String   @db.VarChar(255)
+  password  String   @map("password_hash") @db.VarChar(255)
+  firstName String   @map("first_name") @db.VarChar(100)
+  lastName  String   @map("last_name") @db.VarChar(100)
+  phone     String?  @db.VarChar(50)
+  role      UserRole @default(user)
+  
+  isActive      Boolean   @default(true) @map("is_active")
+  emailVerified Boolean   @default(false) @map("email_verified")
+  lastLoginAt   DateTime? @map("last_login_at")
+  
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  sessions           UserSession[]
+  warehouseAccess    WarehouseUserAssignment[]
+  pickerAssignments  Order[]                   @relation("PickerRelation")
+  packerAssignments  Order[]                   @relation("PackerRelation")
+  pickTasks          PickTask[]
+  packSessions       PackSession[]
+  conversations      Conversation[]
+  messages           Message[]
+  invitations        Invitation[] @relation("InviterRelation")
+  
+  @@unique([tenantId, email])
+  @@map("tenant_users")
+}
+
+model UserSession {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  token     String   @unique @db.VarChar(255)
+  
+  ipAddress String?  @map("ip_address") @db.VarChar(45)
+  userAgent String?  @map("user_agent")
+  
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  user TenantUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([token])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+// =============================================================================
+// WAREHOUSES & LOCATIONS
+// =============================================================================
+
+model Warehouse {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  name     String @db.VarChar(255)
+  code     String @db.VarChar(20)
+  
+  addressLine1 String  @map("address_line1") @db.VarChar(255)
+  addressLine2 String? @map("address_line2") @db.VarChar(255)
+  postalCode   String  @map("postal_code") @db.VarChar(20)
+  city         String  @db.VarChar(100)
+  state        String? @db.VarChar(100)
+  countryCode  String  @default("CH") @map("country_code") @db.Char(2)
+  
+  contactEmail String? @map("contact_email") @db.VarChar(255)
+  contactPhone String? @map("contact_phone") @db.VarChar(50)
+  
+  isActive Boolean @default(true) @map("is_active")
+  priority Int     @default(0)
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  zones        WarehouseZone[]
+  locations    Location[]
+  packStations PackStation[]
+  userAccess   WarehouseUserAssignment[]
+  orders       Order[]
+  wros         WarehouseReceivingOrder[]
+  returns      Return[]
+  pickTasks    PickTask[]
+  pickWaves    PickWave[]
+  
+  @@unique([tenantId, code])
+  @@map("warehouses")
+}
+
+model WarehouseZone {
+  id          String   @id @default(uuid()) @db.Uuid
+  warehouseId String   @map("warehouse_id") @db.Uuid
+  
+  name     String   @db.VarChar(100)
+  code     String   @db.VarChar(20)
+  type     ZoneType @default(general)
+  
+  isPickable Boolean @default(true) @map("is_pickable")
+  isActive   Boolean @default(true) @map("is_active")
+  
+  warehouse Warehouse  @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  locations Location[]
+  
+  @@unique([warehouseId, code])
+  @@map("warehouse_zones")
+}
+
+model Location {
+  id          String @id @default(uuid()) @db.Uuid
+  warehouseId String @map("warehouse_id") @db.Uuid
+  zoneId      String? @map("zone_id") @db.Uuid
+  
+  name    String       @db.VarChar(100)
+  barcode String       @db.VarChar(100)
+  type    LocationType @default(shelf)
+  
+  // Adresse
+  aisle    String? @db.VarChar(10)
+  rack     String? @db.VarChar(10)
+  level    String? @db.VarChar(10)
+  position String? @db.VarChar(10)
+  
+  // Eigenschaften
+  maxWeight    Int? @map("max_weight_kg")
+  lengthMm     Int? @map("length_mm")
+  widthMm      Int? @map("width_mm")
+  heightMm     Int? @map("height_mm")
+  
+  pickSequence Int     @default(0) @map("pick_sequence")
+  isActive     Boolean @default(true) @map("is_active")
+  isPickable   Boolean @default(true) @map("is_pickable")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  warehouse Warehouse      @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  zone      WarehouseZone? @relation(fields: [zoneId], references: [id])
+  
+  inventory   Inventory[]
+  pickTasks   PickTask[]
+  allocations OrderLineAllocation[]
+  
+  @@unique([warehouseId, barcode])
+  @@index([warehouseId, pickSequence])
+  @@map("locations")
+}
+
+model PackStation {
+  id          String @id @default(uuid()) @db.Uuid
+  warehouseId String @map("warehouse_id") @db.Uuid
+  
+  name     String  @db.VarChar(100)
+  code     String  @db.VarChar(20)
+  
+  hasScale        Boolean @default(false) @map("has_scale")
+  hasLabelPrinter Boolean @default(true) @map("has_label_printer")
+  hasScanner      Boolean @default(true) @map("has_scanner")
+  
+  isActive Boolean @default(true) @map("is_active")
+  
+  warehouse    Warehouse     @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  packSessions PackSession[]
+  shipments    Shipment[]
+  
+  @@unique([warehouseId, code])
+  @@map("pack_stations")
+}
+
+model WarehouseUserAssignment {
+  id          String @id @default(uuid()) @db.Uuid
+  warehouseId String @map("warehouse_id") @db.Uuid
+  userId      String @map("user_id") @db.Uuid
+  
+  isPrimary Boolean @default(false) @map("is_primary")
+  
+  warehouse Warehouse  @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  user      TenantUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([warehouseId, userId])
+  @@map("warehouse_user_assignments")
+}
+
+model Carrier {
+  id String @id @default(uuid()) @db.Uuid
+  
+  name        String  @db.VarChar(100)
+  code        String  @unique @db.VarChar(20)
+  trackingUrl String? @map("tracking_url") @db.VarChar(500)
+  isActive    Boolean @default(true) @map("is_active")
+  
+  services  CarrierService[]
+  orders    Order[]
+  returns   Return[]
+  shipments Shipment[]
+  
+  @@map("carriers")
+}
+
+model CarrierService {
+  id        String @id @default(uuid()) @db.Uuid
+  carrierId String @map("carrier_id") @db.Uuid
+  
+  name          String  @db.VarChar(100)
+  code          String  @db.VarChar(50)
+  transitDays   Int?    @map("transit_days")
+  isActive      Boolean @default(true) @map("is_active")
+  
+  carrier   Carrier    @relation(fields: [carrierId], references: [id], onDelete: Cascade)
+  orders    Order[]
+  shipments Shipment[]
+  shippingMappings ShippingMethodMapping[]
+  
+  @@unique([carrierId, code])
+  @@map("carrier_services")
+}
+
+// =============================================================================
+// PRODUCTS & INVENTORY
+// =============================================================================
+
+model Product {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  sku         String @db.VarChar(100)
+  name        String @db.VarChar(500)
+  description String?
+  
+  // Dimensions
+  weightGrams Int? @map("weight_grams")
+  lengthMm    Int? @map("length_mm")
+  widthMm     Int? @map("width_mm")
+  heightMm    Int? @map("height_mm")
+  
+  // Tracking Requirements (dein Requirement!)
+  requiresLotTracking    Boolean @default(false) @map("requires_lot_tracking")
+  requiresExpiryTracking Boolean @default(false) @map("requires_expiry_tracking")
+  requiresSerialTracking Boolean @default(false) @map("requires_serial_tracking")
+  isHazmat               Boolean @default(false) @map("is_hazmat")
+  
+  // Customs
+  hsCode        String? @map("hs_code") @db.VarChar(20)
+  countryOrigin String? @map("country_of_origin") @db.Char(2)
+  
+  // Costs
+  costCents  Int? @map("cost_cents")
+  priceCents Int? @map("price_cents")
+  
+  reorderPoint    Int? @map("reorder_point")
+  reorderQuantity Int? @map("reorder_quantity")
+  
+  isActive Boolean @default(true) @map("is_active")
+  
+  imageUrl String? @map("image_url") @db.VarChar(500)
+  // External (Shopify etc.)
+  externalId     String? @map("external_id") @db.VarChar(255)
+  externalSource String? @map("external_source") @db.VarChar(50)
+  externalData   Json?   @map("external_data")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  barcodes        ProductBarcode[]
+  inventory       Inventory[]
+  orderLines      OrderLine[]
+  wroLines        WroLine[]
+  returnLines     ReturnLine[]
+  pickTasks       PickTask[]
+  packSessionItems PackSessionItem[]
+  
+  // Bundle relations
+  bundleComponents ProductBundleComponent[] @relation("BundleParent")
+  partOfBundles    ProductBundleComponent[] @relation("BundleComponent")
+  
+  @@unique([tenantId, sku])
+  @@map("products")
+}
+
+model ProductBarcode {
+  id        String      @id @default(uuid()) @db.Uuid
+  productId String      @map("product_id") @db.Uuid
+  
+  barcode   String      @db.VarChar(100)
+  type      BarcodeType @default(ean13)
+  isPrimary Boolean     @default(false) @map("is_primary")
+  
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@unique([productId, barcode])
+  @@index([barcode])
+  @@map("product_barcodes")
+}
+
+model ProductBundleComponent {
+  id              String @id @default(uuid()) @db.Uuid
+  bundleProductId String @map("bundle_product_id") @db.Uuid
+  componentId     String @map("component_product_id") @db.Uuid
+  
+  quantity Int @default(1)
+  
+  bundle    Product @relation("BundleParent", fields: [bundleProductId], references: [id], onDelete: Cascade)
+  component Product @relation("BundleComponent", fields: [componentId], references: [id], onDelete: Cascade)
+  
+  @@unique([bundleProductId, componentId])
+  @@map("product_bundle_components")
+}
+
+model Supplier {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  name         String  @db.VarChar(255)
+  code         String  @db.VarChar(50)
+  contactName  String? @map("contact_name") @db.VarChar(255)
+  contactEmail String? @map("contact_email") @db.VarChar(255)
+  contactPhone String? @map("contact_phone") @db.VarChar(50)
+  
+  addressLine1 String? @map("address_line1") @db.VarChar(255)
+  postalCode   String? @map("postal_code") @db.VarChar(20)
+  city         String? @db.VarChar(100)
+  countryCode  String  @default("CH") @map("country_code") @db.Char(2)
+  
+  leadTimeDays Int? @map("lead_time_days")
+  isActive     Boolean @default(true) @map("is_active")
+  
+  wros WarehouseReceivingOrder[]
+  
+  @@unique([tenantId, code])
+  @@map("suppliers")
+}
+
+model Inventory {
+  id          String @id @default(uuid()) @db.Uuid
+  tenantId    String @map("tenant_id") @db.Uuid
+  productId   String @map("product_id") @db.Uuid
+  warehouseId String @map("warehouse_id") @db.Uuid
+  locationId  String @map("location_id") @db.Uuid
+  
+  // Tracking
+  lotNumber    String?   @map("lot_number") @db.VarChar(100)
+  serialNumber String?   @map("serial_number") @db.VarChar(100)
+  expiryDate   DateTime? @map("expiry_date") @db.Date
+  
+  // Quantities
+  quantityOnHand  Int             @default(0) @map("quantity_on_hand")
+  quantityReserved Int            @default(0) @map("quantity_reserved")
+  
+  status    InventoryStatus @default(available)
+  
+  receivedAt DateTime @default(now()) @map("received_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  
+  transactions InventoryTransaction[]
+  allocations  OrderLineAllocation[]
+  
+  @@index([tenantId, productId])
+  @@index([locationId])
+  @@index([lotNumber])
+  @@index([expiryDate])
+  @@map("inventory")
+}
+
+model InventoryTransaction {
+  id          String          @id @default(uuid()) @db.Uuid
+  inventoryId String          @map("inventory_id") @db.Uuid
+  
+  type        TransactionType
+  quantity    Int
+  
+  referenceType String? @map("reference_type") @db.VarChar(50)
+  referenceId   String? @map("reference_id") @db.Uuid
+  
+  notes String?
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by") @db.Uuid
+  
+  inventory Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  
+  @@index([inventoryId, createdAt])
+  @@map("inventory_transactions")
+}
+
+// =============================================================================
+// ORDERS
+// =============================================================================
+
+model Customer {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  externalId String? @map("external_id") @db.VarChar(100)
+  externalSource String? @map("external_source") @db.VarChar(50)
+  email      String? @db.VarChar(255)
+  firstName  String? @map("first_name") @db.VarChar(100)
+  lastName   String? @map("last_name") @db.VarChar(100)
+  company    String? @db.VarChar(255)
+  phone      String? @db.VarChar(50)
+  
+  addressLine1 String? @map("address_line1") @db.VarChar(255)
+  postalCode   String? @map("postal_code") @db.VarChar(20)
+  city         String? @db.VarChar(100)
+  countryCode  String  @default("CH") @map("country_code") @db.Char(2)
+  
+  totalOrders Int @default(0) @map("total_orders")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orders  Order[]
+  returns Return[]
+  
+  @@unique([tenantId, email])
+  @@map("customers")
+}
+
+model Order {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  orderNumber     String       @map("order_number") @db.VarChar(50)
+  externalOrderId String?      @map("external_order_id") @db.VarChar(100)
+  externalSource  String?      @map("external_source") @db.VarChar(50)
+  externalData    Json?        @map("external_data")
+  channel         OrderChannel @default(manual)
+  
+  customerId  String? @map("customer_id") @db.Uuid
+  warehouseId String? @map("warehouse_id") @db.Uuid
+  
+  status          OrderStatus @default(pending)
+  exceptionReason String?     @map("exception_reason") @db.VarChar(255)
+  priority        Int         @default(0)
+  isExpedited     Boolean     @default(false) @map("is_expedited")
+  
+  // Shipping Address
+  shippingFirstName    String  @map("shipping_first_name") @db.VarChar(100)
+  shippingLastName     String  @map("shipping_last_name") @db.VarChar(100)
+  shippingCompany      String? @map("shipping_company") @db.VarChar(255)
+  shippingAddressLine1 String  @map("shipping_address_line1") @db.VarChar(255)
+  shippingAddressLine2 String? @map("shipping_address_line2") @db.VarChar(255)
+  shippingPostalCode   String  @map("shipping_postal_code") @db.VarChar(20)
+  shippingCity         String  @map("shipping_city") @db.VarChar(100)
+  shippingCountryCode  String  @default("CH") @map("shipping_country_code") @db.Char(2)
+  shippingPhone        String? @map("shipping_phone") @db.VarChar(50)
+  shippingEmail        String? @map("shipping_email") @db.VarChar(255)
+  
+  // Carrier
+  carrierId        String? @map("carrier_id") @db.Uuid
+  carrierServiceId String? @map("carrier_service_id") @db.Uuid
+  shippingMethod   String? @map("shipping_method") @db.VarChar(100)
+  
+  // Amounts (cents)
+  subtotalCents Int    @default(0) @map("subtotal_cents")
+  shippingCents Int    @default(0) @map("shipping_cents")
+  taxCents      Int    @default(0) @map("tax_cents")
+  totalCents    Int    @default(0) @map("total_cents")
+  currency      String @default("CHF") @db.VarChar(3)
+  
+  totalItems Int @default(0) @map("total_items")
+  
+  customerNotes  String? @map("customer_notes")
+  internalNotes  String? @map("internal_notes")
+  isGift         Boolean @default(false) @map("is_gift")
+  
+  // Assignment
+  assignedPickerId String? @map("assigned_picker_id") @db.Uuid
+  assignedPackerId String? @map("assigned_packer_id") @db.Uuid
+  
+  // Timestamps
+  orderPlacedAt   DateTime  @default(now()) @map("order_placed_at")
+  releasedAt      DateTime? @map("released_at")
+  pickStartedAt   DateTime? @map("pick_started_at")
+  pickCompletedAt DateTime? @map("pick_completed_at")
+  packStartedAt   DateTime? @map("pack_started_at")
+  packCompletedAt DateTime? @map("pack_completed_at")
+  shippedAt       DateTime? @map("shipped_at")
+  cancelledAt     DateTime? @map("cancelled_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer       Customer?       @relation(fields: [customerId], references: [id])
+  warehouse      Warehouse?      @relation(fields: [warehouseId], references: [id])
+  carrier        Carrier?        @relation(fields: [carrierId], references: [id])
+  carrierService CarrierService? @relation(fields: [carrierServiceId], references: [id])
+  assignedPicker TenantUser?     @relation("PickerRelation", fields: [assignedPickerId], references: [id])
+  assignedPacker TenantUser?     @relation("PackerRelation", fields: [assignedPackerId], references: [id])
+  
+  lines        OrderLine[]
+  shipments    Shipment[]
+  returns      Return[]
+  pickTasks    PickTask[]
+  packSessions PackSession[]
+  
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, orderPlacedAt])
+  @@map("orders")
+}
+
+model OrderLine {
+  id      String @id @default(uuid()) @db.Uuid
+  orderId String @map("order_id") @db.Uuid
+  
+  productId String? @map("product_id") @db.Uuid
+  sku       String  @db.VarChar(100)
+  name      String  @db.VarChar(500)
+  
+  quantityOrdered   Int @map("quantity_ordered")
+  quantityAllocated Int @default(0) @map("quantity_allocated")
+  quantityPicked    Int @default(0) @map("quantity_picked")
+  quantityPacked    Int @default(0) @map("quantity_packed")
+  quantityShipped   Int @default(0) @map("quantity_shipped")
+  
+  unitPriceCents Int @default(0) @map("unit_price_cents")
+  totalCents     Int @default(0) @map("total_cents")
+  externalLineId String? @map("external_line_id") @db.VarChar(255)
+
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id])
+  
+  allocations   OrderLineAllocation[]
+  shipmentItems ShipmentItem[]
+  returnLines   ReturnLine[]
+  
+  @@map("order_lines")
+}
+
+model OrderLineAllocation {
+  id          String @id @default(uuid()) @db.Uuid
+  orderLineId String @map("order_line_id") @db.Uuid
+  inventoryId String @map("inventory_id") @db.Uuid
+  locationId  String @map("location_id") @db.Uuid
+  
+  quantity       Int
+  pickedQuantity Int       @default(0) @map("picked_quantity")
+  pickedAt       DateTime? @map("picked_at")
+  
+  lotNumber    String? @map("lot_number") @db.VarChar(100)
+  serialNumber String? @map("serial_number") @db.VarChar(100)
+  expiryDate   DateTime? @map("expiry_date") @db.Date
+  
+  orderLine OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  inventory Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  location  Location  @relation(fields: [locationId], references: [id])
+  
+  @@map("order_line_allocations")
+}
+
+model Shipment {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  orderId  String @map("order_id") @db.Uuid
+  
+  shipmentNumber String @map("shipment_number") @db.VarChar(50)
+  
+  carrierId        String? @map("carrier_id") @db.Uuid
+  carrierServiceId String? @map("carrier_service_id") @db.Uuid
+  trackingNumber   String? @map("tracking_number") @db.VarChar(255)
+  trackingUrl      String? @map("tracking_url") @db.VarChar(500)
+  
+  labelUrl String? @map("label_url") @db.VarChar(500)
+  
+  shippedAt             DateTime? @map("shipped_at")
+  estimatedDeliveryDate DateTime? @map("estimated_delivery_date") @db.Date
+  
+  weightGrams Int? @map("weight_grams")
+  
+  status String @default("pending") @db.VarChar(30)
+  
+  packedBy      String? @map("packed_by") @db.Uuid
+  packStationId String? @map("pack_station_id") @db.Uuid
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  carrier        Carrier?        @relation(fields: [carrierId], references: [id])
+  carrierService CarrierService? @relation(fields: [carrierServiceId], references: [id])
+  packStation    PackStation?    @relation(fields: [packStationId], references: [id])
+  
+  items ShipmentItem[]
+  
+  @@unique([tenantId, shipmentNumber])
+  @@index([trackingNumber])
+  @@map("shipments")
+}
+
+model ShipmentItem {
+  id          String @id @default(uuid()) @db.Uuid
+  shipmentId  String @map("shipment_id") @db.Uuid
+  orderLineId String @map("order_line_id") @db.Uuid
+  
+  quantity     Int
+  lotNumber    String? @map("lot_number") @db.VarChar(100)
+  serialNumber String? @map("serial_number") @db.VarChar(100)
+  
+  shipment  Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Cascade)
+  orderLine OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  
+  @@map("shipment_items")
+}
+
+// =============================================================================
+// WRO (Warehouse Receiving Orders)
+// =============================================================================
+
+model WarehouseReceivingOrder {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  wroNumber   String    @map("wro_number") @db.VarChar(50)
+  warehouseId String    @map("warehouse_id") @db.Uuid
+  supplierId  String?   @map("supplier_id") @db.Uuid
+  
+  status WroStatus @default(draft)
+  
+  expectedArrivalDate DateTime? @map("expected_arrival_date") @db.Date
+  trackingNumbers     Json      @default("[]") @map("tracking_numbers")
+  carrierName         String?   @map("carrier_name") @db.VarChar(100)
+  
+  expectedBoxCount Int? @map("expected_box_count")
+  notes            String?
+  
+  arrivedAt    DateTime? @map("arrived_at")
+  completedAt  DateTime? @map("completed_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  warehouse Warehouse  @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  supplier  Supplier?  @relation(fields: [supplierId], references: [id])
+  
+  lines WroLine[]
+  boxes WroBox[]
+  
+  @@unique([tenantId, wroNumber])
+  @@map("warehouse_receiving_orders")
+}
+
+model WroLine {
+  id    String @id @default(uuid()) @db.Uuid
+  wroId String @map("wro_id") @db.Uuid
+  
+  productId String @map("product_id") @db.Uuid
+  
+  quantityExpected Int @map("quantity_expected")
+  quantityReceived Int @default(0) @map("quantity_received")
+  quantityDamaged  Int @default(0) @map("quantity_damaged")
+  
+  lotNumber  String?   @map("lot_number") @db.VarChar(100)
+  expiryDate DateTime? @map("expiry_date") @db.Date
+  
+  wro     WarehouseReceivingOrder @relation(fields: [wroId], references: [id], onDelete: Cascade)
+  product Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@map("wro_lines")
+}
+
+model WroBox {
+  id    String @id @default(uuid()) @db.Uuid
+  wroId String @map("wro_id") @db.Uuid
+  
+  boxNumber      Int     @map("box_number")
+  trackingNumber String? @map("tracking_number") @db.VarChar(255)
+  weightGrams    Int?    @map("weight_grams")
+  
+  status     String    @default("expected") @db.VarChar(20)
+  arrivedAt  DateTime? @map("arrived_at")
+  processedAt DateTime? @map("processed_at")
+  
+  wro WarehouseReceivingOrder @relation(fields: [wroId], references: [id], onDelete: Cascade)
+  
+  @@unique([wroId, boxNumber])
+  @@map("wro_boxes")
+}
+
+// =============================================================================
+// RETURNS
+// =============================================================================
+
+model Return {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  returnNumber String       @map("return_number") @db.VarChar(50)
+  externalId     String? @map("external_id") @db.VarChar(255)
+  externalSource String? @map("external_source") @db.VarChar(50)
+
+  orderId      String?      @map("order_id") @db.Uuid
+  customerId   String?      @map("customer_id") @db.Uuid
+  warehouseId  String       @map("warehouse_id") @db.Uuid
+  
+  status ReturnStatus @default(requested)
+  
+  returnReason  String? @map("return_reason") @db.VarChar(100)
+  returnDetails String? @map("return_details")
+  
+  trackingNumber String? @map("tracking_number") @db.VarChar(255)
+  carrierId      String? @map("carrier_id") @db.Uuid
+  
+  requestedAt DateTime  @default(now()) @map("requested_at")
+  arrivedAt   DateTime? @map("arrived_at")
+  completedAt DateTime? @map("completed_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  order     Order?     @relation(fields: [orderId], references: [id])
+  customer  Customer?  @relation(fields: [customerId], references: [id])
+  warehouse Warehouse  @relation(fields: [warehouseId], references: [id])
+  carrier   Carrier?   @relation(fields: [carrierId], references: [id])
+  
+  lines ReturnLine[]
+  
+  @@unique([tenantId, returnNumber])
+  @@map("returns")
+}
+
+model ReturnLine {
+  id       String @id @default(uuid()) @db.Uuid
+  returnId String @map("return_id") @db.Uuid
+  
+  productId   String? @map("product_id") @db.Uuid
+  orderLineId String? @map("order_line_id") @db.Uuid
+  sku         String  @db.VarChar(100)
+  name        String  @db.VarChar(500)
+  
+  quantityExpected Int @map("quantity_expected")
+  quantityReceived Int @default(0) @map("quantity_received")
+  
+  requestedAction ReturnAction @default(restock) @map("requested_action")
+  actualAction    ReturnAction? @map("actual_action")
+  
+  condition      String? @db.VarChar(30)
+  conditionNotes String? @map("condition_notes")
+  
+  return_   Return     @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  product   Product?   @relation(fields: [productId], references: [id])
+  orderLine OrderLine? @relation(fields: [orderLineId], references: [id])
+  
+  @@map("return_lines")
+}
+
+// =============================================================================
+// OPERATIONS
+// =============================================================================
+
+model PickTask {
+  id          String @id @default(uuid()) @db.Uuid
+  tenantId    String @map("tenant_id") @db.Uuid
+  warehouseId String @map("warehouse_id") @db.Uuid
+  orderId     String @map("order_id") @db.Uuid
+  
+  productId  String @map("product_id") @db.Uuid
+  locationId String @map("location_id") @db.Uuid
+  
+  quantityToPick Int @map("quantity_to_pick")
+  quantityPicked Int @default(0) @map("quantity_picked")
+  
+  lotNumber    String?   @map("lot_number") @db.VarChar(100)
+  serialNumber String?   @map("serial_number") @db.VarChar(100)
+  expiryDate   DateTime? @map("expiry_date") @db.Date
+  
+  assignedTo String? @map("assigned_to") @db.Uuid
+  waveId     String? @map("wave_id") @db.Uuid
+  
+  status       PickTaskStatus @default(pending)
+  pickSequence Int            @default(0) @map("pick_sequence")
+  
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  warehouse    Warehouse   @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  order        Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product      Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  location     Location    @relation(fields: [locationId], references: [id])
+  assignedUser TenantUser? @relation(fields: [assignedTo], references: [id])
+  wave         PickWave?   @relation(fields: [waveId], references: [id])
+  
+  @@index([warehouseId, status])
+  @@index([assignedTo, status])
+  @@map("pick_tasks")
+}
+
+model PickWave {
+  id          String @id @default(uuid()) @db.Uuid
+  tenantId    String @map("tenant_id") @db.Uuid
+  warehouseId String @map("warehouse_id") @db.Uuid
+  
+  waveNumber String @map("wave_number") @db.VarChar(50)
+  waveType   String @default("batch") @map("wave_type") @db.VarChar(30)
+  status     String @default("created") @db.VarChar(20)
+  
+  totalOrders    Int @default(0) @map("total_orders")
+  totalItems     Int @default(0) @map("total_items")
+  totalLocations Int @default(0) @map("total_locations")
+  
+  releasedAt  DateTime? @map("released_at")
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  warehouse Warehouse  @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  tasks     PickTask[]
+  
+  @@unique([tenantId, waveNumber])
+  @@map("pick_waves")
+}
+
+model PackSession {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  orderId  String @map("order_id") @db.Uuid
+  
+  packStationId String? @map("pack_station_id") @db.Uuid
+  packedBy      String  @map("packed_by") @db.Uuid
+  
+  status String @default("in_progress") @db.VarChar(20)
+  
+  startedAt   DateTime  @default(now()) @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  
+  boxType          String? @map("box_type") @db.VarChar(100)
+  totalWeightGrams Int?    @map("total_weight_grams")
+  
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  packStation PackStation? @relation(fields: [packStationId], references: [id])
+  packer      TenantUser   @relation(fields: [packedBy], references: [id])
+  
+  items PackSessionItem[]
+  
+  @@map("pack_sessions")
+}
+
+model PackSessionItem {
+  id            String @id @default(uuid()) @db.Uuid
+  packSessionId String @map("pack_session_id") @db.Uuid
+  productId     String @map("product_id") @db.Uuid
+  
+  quantity       Int
+  scannedBarcode String?   @map("scanned_barcode") @db.VarChar(100)
+  scannedAt      DateTime? @map("scanned_at")
+  
+  lotNumber    String? @map("lot_number") @db.VarChar(100)
+  serialNumber String? @map("serial_number") @db.VarChar(100)
+  
+  packSession PackSession @relation(fields: [packSessionId], references: [id], onDelete: Cascade)
+  product     Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@map("pack_session_items")
+}
+
+// =============================================================================
+// COMMUNICATION
+// =============================================================================
+
+model Conversation {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  type          ConversationType   @default(general)
+  referenceType String?            @map("reference_type") @db.VarChar(30)
+  referenceId   String?            @map("reference_id") @db.Uuid
+  
+  subject String @db.VarChar(500)
+  status  ConversationStatus @default(open)
+  priority String @default("normal") @db.VarChar(20)
+  
+  assignedTo         String? @map("assigned_to_platform_user") @db.Uuid
+  createdByTenantUser String? @map("created_by_tenant_user") @db.Uuid
+  
+  firstResponseAt DateTime? @map("first_response_at")
+  resolvedAt      DateTime? @map("resolved_at")
+  lastMessageAt   DateTime? @map("last_message_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant         Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedStaff  PlatformUser? @relation(fields: [assignedTo], references: [id])
+  createdByUser  TenantUser?   @relation(fields: [createdByTenantUser], references: [id])
+  
+  messages Message[]
+  
+  @@index([tenantId, status])
+  @@map("conversations")
+}
+
+model Message {
+  id             String @id @default(uuid()) @db.Uuid
+  conversationId String @map("conversation_id") @db.Uuid
+  
+  senderTenantUserId   String? @map("sender_tenant_user_id") @db.Uuid
+  senderPlatformUserId String? @map("sender_platform_user_id") @db.Uuid
+  senderType           String  @map("sender_type") @db.VarChar(20)
+  
+  body     String
+  bodyHtml String? @map("body_html")
+  
+  readAt      DateTime? @map("read_at")
+  isAutomated Boolean   @default(false) @map("is_automated")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderTenant   TenantUser?   @relation(fields: [senderTenantUserId], references: [id])
+  senderPlatform PlatformUser? @relation(fields: [senderPlatformUserId], references: [id])
+  
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// =============================================================================
+// API & INTEGRATIONS
+// =============================================================================
+
+model ApiKey {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  name      String @db.VarChar(255)
+  keyPrefix String @map("key_prefix") @db.VarChar(10)
+  keyHash   String @map("key_hash") @db.VarChar(255)
+  
+  scopes Json @default("[]")
+  
+  rateLimitPerMinute Int @default(60) @map("rate_limit_per_minute")
+  rateLimitPerDay    Int @default(10000) @map("rate_limit_per_day")
+  
+  isActive  Boolean   @default(true) @map("is_active")
+  expiresAt DateTime? @map("expires_at")
+  
+  lastUsedAt DateTime? @map("last_used_at")
+  lastUsedIp String?   @map("last_used_ip") @db.VarChar(45)
+  
+  createdAt DateTime  @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+  
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  @@index([keyPrefix])
+  @@map("api_keys")
+}
+
+model WebhookSubscription {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  
+  url        String @db.VarChar(500)
+  events     Json   @default("[]")
+  secretHash String @map("secret_hash") @db.VarChar(255)
+  
+  isActive     Boolean @default(true) @map("is_active")
+  maxRetries   Int     @default(3) @map("max_retries")
+  failureCount Int     @default(0) @map("failure_count")
+  
+  lastTriggeredAt DateTime? @map("last_triggered_at")
+  lastSuccessAt   DateTime? @map("last_success_at")
+  lastFailureAt   DateTime? @map("last_failure_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant     Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+  
+  @@map("webhook_subscriptions")
+}
+
+model WebhookDelivery {
+  id             String @id @default(uuid()) @db.Uuid
+  subscriptionId String @map("subscription_id") @db.Uuid
+  
+  eventType String @map("event_type") @db.VarChar(100)
+  payload   Json
+  
+  status             String @default("pending") @db.VarChar(20)
+  responseStatusCode Int?   @map("response_status_code")
+  responseBody       String? @map("response_body")
+  responseTimeMs     Int?    @map("response_time_ms")
+  
+  attemptCount Int       @default(0) @map("attempt_count")
+  nextRetryAt  DateTime? @map("next_retry_at")
+  
+  createdAt   DateTime  @default(now()) @map("created_at")
+  deliveredAt DateTime? @map("delivered_at")
+  
+  subscription WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  @@index([status, nextRetryAt])
+  @@map("webhook_deliveries")
+}
+
+model ShippingMethodMapping {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  integrationId          String @map("integration_id") @db.Uuid
+  externalShippingMethod String @map("external_shipping_method") @db.VarChar(255)
+  carrierServiceId       String @map("carrier_service_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  integration    Integration    @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  carrierService CarrierService @relation(fields: [carrierServiceId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, integrationId, externalShippingMethod])
+  @@map("shipping_method_mappings")
+}
+
+model Integration {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  platform    String @db.VarChar(50)
+  name        String @db.VarChar(255)
+  credentials Json
+
+  isActive      Boolean @default(true) @map("is_active")
+  syncOrders    Boolean @default(true) @map("sync_orders")
+  syncProducts  Boolean @default(false) @map("sync_products")
+  syncInventory Boolean @default(true) @map("sync_inventory")
+  autoFulfill   Boolean @default(true) @map("auto_fulfill")
+
+  lastOrderSyncAt     DateTime? @map("last_order_sync_at")
+  lastInventorySyncAt DateTime? @map("last_inventory_sync_at")
+
+  lastError   String?   @map("last_error")
+  lastErrorAt DateTime? @map("last_error_at")
+  errorCount  Int       @default(0) @map("error_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant           Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shippingMappings ShippingMethodMapping[]
+
+  @@map("integrations")
+}
+
+// =============================================================================
+// AUDIT
+// =============================================================================
+
+model AuditLog {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String? @map("tenant_id") @db.Uuid
+  
+  userId       String? @map("user_id") @db.Uuid
+  userEmail    String? @map("user_email") @db.VarChar(255)
+  
+  action     String @db.VarChar(50)
+  entityType String @map("entity_type") @db.VarChar(50)
+  entityId   String? @map("entity_id") @db.Uuid
+  
+  oldValues Json? @map("old_values")
+  newValues Json? @map("new_values")
+  changes   Json?
+  
+  ipAddress String? @map("ip_address") @db.VarChar(45)
+  userAgent String? @map("user_agent")
+  requestId String? @map("request_id") @db.VarChar(100)
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  
+  @@index([tenantId, createdAt])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// =============================================================================
+// PERMISSIONS & AUTHORIZATION
+// =============================================================================
+
+enum PermissionAction {
+  // System
+  impersonate_user
+  
+  // Users
+  users_read
+  users_create
+  users_update
+  users_delete
+  
+  // Tenants
+  tenants_read
+  tenants_create
+  tenants_update
+  tenants_delete
+  
+  // Products
+  products_read
+  products_create
+  products_update
+  products_delete
+  
+  // Orders
+  orders_read
+  orders_update
+  orders_delete
+  
+  // Inventory
+  inventory_read
+  inventory_adjust
+  
+  // Warehouses
+  warehouses_read
+  warehouses_create
+  warehouses_update
+  warehouses_delete
+  
+  // Zones
+  zones_read
+  zones_create
+  zones_update
+  zones_delete
+  
+  // Locations
+  locations_read
+  locations_create
+  locations_update
+  locations_delete
+  
+  // Shipments
+  shipments_read
+  shipments_create
+  
+  // Returns
+  returns_read
+  returns_update
+  
+  // Inventory Counts
+  inventory_counts_read
+  inventory_counts_create
+  inventory_counts_update
+  
+  // MHD
+  mhd_read
+  
+  // Billing
+  billing_read
+  billing_manage
+  
+  // WRO
+  wro_read
+  wro_create
+  wro_update
+}
+
+model Permission {
+  id          String           @id @default(uuid()) @db.Uuid
+  action      PermissionAction @unique
+  name        String           @db.VarChar(100)
+  description String?          @db.VarChar(255)
+  category    String           @db.VarChar(50)
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  
+  @@map("permissions")
+}
+
+model Invitation {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String? @map("tenant_id") @db.Uuid
+  
+  email        String   @db.VarChar(255)
+  roleToAssign UserRole @map("role_to_assign")
+  tokenHash    String   @map("token_hash") @db.VarChar(255)
+  
+  invitedBy  String    @map("invited_by") @db.Uuid
+  acceptedAt DateTime? @map("accepted_at")
+  expiresAt  DateTime  @map("expires_at")
+  
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  
+  tenant  Tenant?    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  inviter TenantUser @relation("InviterRelation", fields: [invitedBy], references: [id], onDelete: Cascade)
+  
+  @@unique([tenantId, email])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@map("invitations")
+}
