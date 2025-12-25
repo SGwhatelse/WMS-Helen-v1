@@ -1,3 +1,4 @@
+
 import type { FastifyPluginAsync } from 'fastify'
 import { prisma } from '@wms/database'
 import { requirePlatformUser, requirePermission, PermissionAction } from '../middleware/authorization.js'
@@ -397,6 +398,536 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     })
     
     return { data: invitations }
+  })
+// =============================================================================
+  // TENANT INVOICES
+  // =============================================================================
+
+  // GET /api/admin/tenants/:tenantId/invoices
+  app.get('/tenants/:tenantId/invoices', {
+    preHandler: requirePermission(PermissionAction.BILLING_READ)
+  }, async (request, reply) => {
+    const { tenantId } = request.params as { tenantId: string }
+    const { limit = '10' } = request.query as any
+
+    const invoices = await prisma.invoice.findMany({
+      where: { tenantId },
+      orderBy: { createdAt: 'desc' },
+      take: parseInt(limit),
+    })
+
+    return { data: invoices }
+  })
+
+  // POST /api/admin/tenants/:tenantId/invoices
+  app.post('/tenants/:tenantId/invoices', {
+    preHandler: requirePermission(PermissionAction.BILLING_MANAGE)
+  }, async (request, reply) => {
+    const { tenantId } = request.params as { tenantId: string }
+    const { amountCents, currency, periodStart, periodEnd, dueDate, notes } = request.body as any
+
+    // Generate invoice number
+    const count = await prisma.invoice.count()
+    const invoiceNumber = `INV-${String(count + 1).padStart(6, '0')}`
+
+    const invoice = await prisma.invoice.create({
+      data: {
+        tenantId,
+        invoiceNumber,
+        amountCents,
+        currency: currency || 'CHF',
+        periodStart: periodStart ? new Date(periodStart) : null,
+        periodEnd: periodEnd ? new Date(periodEnd) : null,
+        dueDate: dueDate ? new Date(dueDate) : null,
+        notes,
+        status: 'draft',
+      },
+    })
+
+    return invoice
+  })
+
+  // PATCH /api/admin/invoices/:id
+  app.patch('/invoices/:id', {
+    preHandler: requirePermission(PermissionAction.BILLING_MANAGE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    const invoice = await prisma.invoice.update({
+      where: { id },
+      data,
+    })
+
+    return invoice
+  })
+
+  // =============================================================================
+  // TENANT CONTACT LOGS
+  // =============================================================================
+
+  // GET /api/admin/tenants/:tenantId/contacts
+  app.get('/tenants/:tenantId/contacts', {
+    preHandler: requirePermission(PermissionAction.TENANTS_READ)
+  }, async (request, reply) => {
+    const { tenantId } = request.params as { tenantId: string }
+    const { limit = '10' } = request.query as any
+
+    const contacts = await prisma.contactLog.findMany({
+      where: { tenantId },
+      include: {
+        contactedByUser: {
+          select: { firstName: true, lastName: true, email: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+      take: parseInt(limit),
+    })
+
+    return { data: contacts }
+  })
+
+  // POST /api/admin/tenants/:tenantId/contacts
+  app.post('/tenants/:tenantId/contacts', {
+    preHandler: requirePermission(PermissionAction.TENANTS_UPDATE)
+  }, async (request, reply) => {
+    const { tenantId } = request.params as { tenantId: string }
+    const { channel, subject, content, status } = request.body as any
+
+    // Get current admin user from cookies
+    const adminId = request.cookies.wms_admin_id
+
+    const contactLog = await prisma.contactLog.create({
+      data: {
+        tenantId,
+        channel,
+        subject,
+        content,
+        status: status || 'open',
+        contactedBy: adminId || null,
+      },
+    })
+
+    return contactLog
+  })
+
+  // PATCH /api/admin/contacts/:id
+  app.patch('/contacts/:id', {
+    preHandler: requirePermission(PermissionAction.TENANTS_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    if (data.status === 'resolved' || data.status === 'closed') {
+      data.resolvedAt = new Date()
+    }
+
+    const contactLog = await prisma.contactLog.update({
+      where: { id },
+      data,
+    })
+
+    return contactLog
+  })
+
+  // =============================================================================
+  // TENANT USERS (within tenant)
+  // =============================================================================
+
+  // GET /api/admin/tenants/:tenantId/users
+  app.get('/tenants/:tenantId/users', {
+    preHandler: requirePermission(PermissionAction.USERS_READ)
+  }, async (request, reply) => {
+    const { tenantId } = request.params as { tenantId: string }
+
+    const users = await prisma.tenantUser.findMany({
+      where: { tenantId },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        isActive: true,
+        lastLoginAt: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return { data: users }
+  })
+
+  // POST /api/admin/tenants/:tenantId/users
+  app.post('/tenants/:tenantId/users', {
+    preHandler: requirePermission(PermissionAction.USERS_CREATE)
+  }, async (request, reply) => {
+    const { tenantId } = request.params as { tenantId: string }
+    const { email, firstName, lastName, role, sendInvite = true } = request.body as any
+
+    // Check tenant exists
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } })
+    if (!tenant) {
+      return reply.status(404).send({ error: 'Tenant not found' })
+    }
+
+    // Check if user already exists
+    const existingUser = await prisma.tenantUser.findUnique({
+      where: { tenantId_email: { tenantId, email } },
+    })
+    if (existingUser) {
+      return reply.status(400).send({ error: 'User already exists in this tenant' })
+    }
+
+    // Create user with temporary password
+    const bcrypt = await import('bcryptjs')
+    const tempPassword = crypto.randomUUID()
+    const passwordHash = await bcrypt.hash(tempPassword, 10)
+
+    const user = await prisma.tenantUser.create({
+      data: {
+        tenantId,
+        email,
+        firstName,
+        lastName,
+        role: role || 'user',
+        password: passwordHash,
+        isActive: true,
+        emailVerified: false,
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        isActive: true,
+      },
+    })
+
+    // Create invitation for password reset
+    if (sendInvite) {
+      const token = crypto.randomUUID()
+      const tokenHash = await bcrypt.hash(token, 10)
+
+      await prisma.invitation.create({
+        data: {
+          tenantId,
+          email,
+          roleToAssign: role || 'user',
+          tokenHash,
+          invitedBy: user.id,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        },
+      })
+
+      // TODO: Send invitation email
+    }
+
+    return user
+  })
+
+  // PATCH /api/admin/tenants/:tenantId/users/:userId
+  app.patch('/tenants/:tenantId/users/:userId', {
+    preHandler: requirePermission(PermissionAction.USERS_UPDATE)
+  }, async (request, reply) => {
+    const { tenantId, userId } = request.params as { tenantId: string; userId: string }
+    const data = request.body as any
+
+    const user = await prisma.tenantUser.update({
+      where: { id: userId, tenantId },
+      data,
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        isActive: true,
+      },
+    })
+
+    return user
+  })
+// GET /api/admin/tenants/:tenantId/invitations
+// =============================================================================
+  // WAREHOUSES MANAGEMENT
+  // =============================================================================
+
+  // GET /api/admin/warehouses
+  app.get('/warehouses', {
+    preHandler: requirePermission(PermissionAction.WAREHOUSES_READ)
+  }, async (request, reply) => {
+    const { tenantId } = request.query as { tenantId?: string }
+
+    const where = tenantId ? { tenantId } : {}
+
+    const warehouses = await prisma.warehouse.findMany({
+      where,
+      include: {
+        tenant: { select: { id: true, name: true } },
+        _count: { select: { zones: true, locations: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return { data: warehouses }
+  })
+
+  // POST /api/admin/warehouses
+  app.post('/warehouses', {
+    preHandler: requirePermission(PermissionAction.WAREHOUSES_CREATE)
+  }, async (request, reply) => {
+    const data = request.body as any
+
+    const warehouse = await prisma.warehouse.create({
+      data: {
+        tenantId: data.tenantId,
+        name: data.name,
+        code: data.code,
+        addressLine1: data.addressLine1 || '',
+        postalCode: data.postalCode || '',
+        city: data.city || '',
+        countryCode: data.countryCode || 'CH',
+        contactEmail: data.contactEmail,
+        contactPhone: data.contactPhone,
+        isActive: true,
+      },
+    })
+
+    return warehouse
+  })
+
+  // GET /api/admin/warehouses/:id
+  app.get('/warehouses/:id', {
+    preHandler: requirePermission(PermissionAction.WAREHOUSES_READ)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+
+    const warehouse = await prisma.warehouse.findUnique({
+      where: { id },
+      include: {
+        tenant: { select: { id: true, name: true } },
+        zones: {
+          include: { _count: { select: { locations: true } } },
+          orderBy: { code: 'asc' },
+        },
+        _count: { select: { locations: true } },
+      },
+    })
+
+    if (!warehouse) {
+      return reply.status(404).send({ error: 'Warehouse not found' })
+    }
+
+    return warehouse
+  })
+
+  // PATCH /api/admin/warehouses/:id
+  app.patch('/warehouses/:id', {
+    preHandler: requirePermission(PermissionAction.WAREHOUSES_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    const warehouse = await prisma.warehouse.update({
+      where: { id },
+      data,
+    })
+
+    return warehouse
+  })
+
+  // =============================================================================
+  // ZONES MANAGEMENT
+  // =============================================================================
+
+  // POST /api/admin/warehouses/:warehouseId/zones
+  app.post('/warehouses/:warehouseId/zones', {
+    preHandler: requirePermission(PermissionAction.ZONES_CREATE)
+  }, async (request, reply) => {
+    const { warehouseId } = request.params as { warehouseId: string }
+    const { name, code, type } = request.body as any
+
+    const zone = await prisma.warehouseZone.create({
+      data: {
+        warehouseId,
+        name,
+        code,
+        type: type || 'general',
+        isActive: true,
+        isPickable: true,
+      },
+    })
+
+    return zone
+  })
+
+  // PATCH /api/admin/zones/:id
+  app.patch('/zones/:id', {
+    preHandler: requirePermission(PermissionAction.ZONES_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    const zone = await prisma.warehouseZone.update({
+      where: { id },
+      data,
+    })
+
+    return zone
+  })
+
+  // DELETE /api/admin/zones/:id
+  app.delete('/zones/:id', {
+    preHandler: requirePermission(PermissionAction.ZONES_DELETE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+
+    await prisma.warehouseZone.delete({ where: { id } })
+
+    return { success: true }
+  })
+
+  // =============================================================================
+  // LOCATIONS MANAGEMENT
+  // =============================================================================
+
+  // GET /api/admin/warehouses/:warehouseId/locations
+  app.get('/warehouses/:warehouseId/locations', {
+    preHandler: requirePermission(PermissionAction.LOCATIONS_READ)
+  }, async (request, reply) => {
+    const { warehouseId } = request.params as { warehouseId: string }
+    const { zoneId, type, search } = request.query as any
+
+    const where: any = { warehouseId }
+    if (zoneId) where.zoneId = zoneId
+    if (type) where.type = type
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { barcode: { contains: search, mode: 'insensitive' } },
+      ]
+    }
+
+    const locations = await prisma.location.findMany({
+      where,
+      include: { zone: { select: { id: true, name: true, code: true } } },
+      orderBy: [{ zone: { code: 'asc' } }, { level: 'asc' }, { position: 'asc' }],
+    })
+
+    return { data: locations }
+  })
+
+// POST /api/admin/warehouses/:warehouseId/locations
+  app.post('/warehouses/:warehouseId/locations', {
+    preHandler: requirePermission(PermissionAction.LOCATIONS_CREATE)
+  }, async (request, reply) => {
+    const { warehouseId } = request.params as { warehouseId: string }
+    const { 
+      regalFrom, regalTo,
+      ebeneFrom, ebeneTo,
+      platzFrom, platzTo,
+      type,
+      maxWeightKg,
+      lengthMm,
+      widthMm,
+      heightMm
+    } = request.body as any
+
+    const locations = []
+    
+    // Parse ranges
+    const regalStart = parseInt(regalFrom) || 1
+    const regalEnd = parseInt(regalTo) || regalStart
+    const ebeneStart = parseInt(ebeneFrom) || 1
+    const ebeneEnd = parseInt(ebeneTo) || ebeneStart
+    const platzStart = parseInt(platzFrom) || 1
+    const platzEnd = parseInt(platzTo) || platzStart
+
+    // Create locations for all combinations
+    for (let regal = regalStart; regal <= regalEnd; regal++) {
+      for (let ebene = ebeneStart; ebene <= ebeneEnd; ebene++) {
+        for (let platz = platzStart; platz <= platzEnd; platz++) {
+          const regalStr = String(regal).padStart(2, '0')
+          const ebeneStr = String(ebene).padStart(2, '0')
+          const platzStr = String(platz).padStart(2, '0')
+          
+          const barcode = `A${regalStr}-${ebeneStr}-${platzStr}`
+          const name = barcode
+
+          try {
+            const location = await prisma.location.create({
+              data: {
+                warehouseId,
+                zoneId: null,
+                name,
+                barcode,
+                type: type || 'shelf',
+                aisle: `A${regalStr}`,
+                level: ebeneStr,
+                position: platzStr,
+                maxWeight: maxWeightKg ? parseInt(maxWeightKg) : null,
+                lengthMm: lengthMm ? parseInt(lengthMm) : null,
+                widthMm: widthMm ? parseInt(widthMm) : null,
+                heightMm: heightMm ? parseInt(heightMm) : null,
+                isActive: true,
+                isPickable: true,
+              },
+            })
+            locations.push(location)
+          } catch (e: any) {
+            // Skip duplicates
+            if (!e.message?.includes('Unique constraint')) {
+              throw e
+            }
+          }
+        }
+      }
+    }
+
+    return { 
+      data: locations, 
+      count: locations.length,
+      message: `${locations.length} Lagerplätze erstellt`
+    }
+  })
+
+  // PATCH /api/admin/locations/:id
+  app.patch('/locations/:id', {
+    preHandler: requirePermission(PermissionAction.LOCATIONS_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    const location = await prisma.location.update({
+      where: { id },
+      data,
+    })
+
+    return location
+  })
+
+// DELETE /api/admin/locations/:id
+  app.delete('/locations/:id', {
+    preHandler: requirePermission(PermissionAction.LOCATIONS_DELETE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+
+    // Check if location has inventory
+    const inventoryCount = await prisma.inventory.count({
+      where: { locationId: id, quantityOnHand: { gt: 0 } }
+    })
+
+    if (inventoryCount > 0) {
+      return reply.status(400).send({ 
+        error: 'Lagerplatz kann nicht gelöscht werden',
+        message: 'Es sind noch Artikel auf diesem Lagerplatz eingebucht.'
+      })
+    }
+
+    await prisma.location.delete({ where: { id } })
+return { success: true }
   })
 }
 

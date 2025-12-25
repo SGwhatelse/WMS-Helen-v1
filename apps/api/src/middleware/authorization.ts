@@ -37,35 +37,37 @@ export async function loadUserContext(
   request: FastifyRequest,
   reply: FastifyReply
 ) {
+  // Try Platform User first (admin cookies)
+  const adminId = request.cookies.wms_admin_id
+  const adminSession = request.cookies.wms_admin_session
+
+  if (adminId && adminSession) {
+    const platformUser = await prisma.platformUser.findUnique({
+      where: { id: adminId, isActive: true },
+    })
+
+    if (platformUser) {
+      const permissions = getPlatformPermissions(platformUser.role as PlatformRole)
+      request.userContext = {
+        type: 'platform',
+        userId: platformUser.id,
+        role: platformUser.role,
+        tenantId: null,
+        permissions,
+        isImpersonating: false,
+        originalUserId: null,
+      }
+      return
+    }
+  }
+
+  // Try Tenant User
   const token = request.cookies.wms_session
-  
+
   if (!token) {
     request.userContext = null
     return
   }
-
-  // Try Platform User first
-  const platformSession = await prisma.platformUser.findFirst({
-    where: {
-      id: token, // Simplified - in production use proper session table
-      isActive: true,
-    },
-  })
-
-  if (platformSession) {
-    const permissions = getPlatformPermissions(platformSession.role as PlatformRole)
-    request.userContext = {
-      type: 'platform',
-      userId: platformSession.id,
-      role: platformSession.role,
-      tenantId: null,
-      permissions,
-      isImpersonating: false,
-      originalUserId: null,
-    }
-    return
-  }
-
   // Try Tenant User
   const session = await prisma.userSession.findUnique({
     where: { token },

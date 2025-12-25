@@ -275,7 +275,8 @@ model PlatformUser {
   managedTenants  Tenant[]       @relation("CSMRelation")
   conversations   Conversation[]
   messages        Message[]
-  
+  contactLogs     ContactLog[]
+ 
   @@map("platform_users")
 }
 
@@ -325,6 +326,9 @@ model Tenant {
   integrations     Integration[]
   shippingMappings ShippingMethodMapping[]
   auditLogs        AuditLog[]
+  invoices         Invoice[]
+  shipperAddresses ShipperAddress[]
+  contactLogs      ContactLog[]
   invitations      Invitation[]
   
   @@map("tenants")
@@ -618,36 +622,56 @@ model WarehouseUserAssignment {
   @@map("warehouse_user_assignments")
 }
 
-model Carrier {
   id String @id @default(uuid()) @db.Uuid
-  
+  model Carrier {
+  id String @id @default(uuid()) @db.Uuid
+
   name        String  @db.VarChar(100)
   code        String  @unique @db.VarChar(20)
   trackingUrl String? @map("tracking_url") @db.VarChar(500)
+  logoUrl     String? @map("logo_url") @db.VarChar(500)
   isActive    Boolean @default(true) @map("is_active")
-  
+
+  // API Credentials
+  apiBaseUrl    String? @map("api_base_url") @db.VarChar(500)
+  apiUsername   String? @map("api_username") @db.VarChar(255)
+  apiPassword   String? @map("api_password") @db.VarChar(255)
+  apiKey        String? @map("api_key") @db.VarChar(500)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
   services  CarrierService[]
   orders    Order[]
   returns   Return[]
   shipments Shipment[]
-  
+
   @@map("carriers")
 }
+}
 
-model CarrierService {
+  model CarrierService {
   id        String @id @default(uuid()) @db.Uuid
   carrierId String @map("carrier_id") @db.Uuid
-  
+
   name          String  @db.VarChar(100)
   code          String  @db.VarChar(50)
+  type          String  @default("parcel") @db.VarChar(20)
   transitDays   Int?    @map("transit_days")
   isActive      Boolean @default(true) @map("is_active")
-  
+
+  maxWeightG    Int?    @map("max_weight_g")
+  maxLengthMm   Int?    @map("max_length_mm")
+  maxWidthMm    Int?    @map("max_width_mm")
+  maxHeightMm   Int?    @map("max_height_mm")
+  sortOrder     Int     @default(0) @map("sort_order")
+
   carrier   Carrier    @relation(fields: [carrierId], references: [id], onDelete: Cascade)
   orders    Order[]
   shipments Shipment[]
   shippingMappings ShippingMethodMapping[]
-  
+  storeConfigs StoreShipperConfig[]
+
   @@unique([carrierId, code])
   @@map("carrier_services")
 }
@@ -1488,6 +1512,7 @@ model Integration {
 
   tenant           Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   shippingMappings ShippingMethodMapping[]
+  shipperConfig    StoreShipperConfig?
 
   @@map("integrations")
 }
@@ -1637,4 +1662,132 @@ model Invitation {
   @@index([tokenHash])
   @@index([expiresAt])
   @@map("invitations")
+}
+// =============================================================================
+// BILLING & CONTACT
+// =============================================================================
+
+enum InvoiceStatus {
+  draft
+  sent
+  paid
+  overdue
+  cancelled
+}
+
+enum ContactChannel {
+  email
+  phone
+  meeting
+  chat
+  ticket
+}
+
+enum ContactStatus {
+  open
+  in_progress
+  resolved
+  closed
+}
+
+model Invoice {
+  id         String        @id @default(uuid()) @db.Uuid
+  tenantId   String        @map("tenant_id") @db.Uuid
+  
+  invoiceNumber String     @unique @map("invoice_number") @db.VarChar(50)
+  status        InvoiceStatus @default(draft)
+  
+  amountCents   Int        @map("amount_cents")
+  currency      String     @default("CHF") @db.VarChar(3)
+  taxPercent    Decimal?   @map("tax_percent") @db.Decimal(5, 2)
+  
+  periodStart   DateTime?  @map("period_start")
+  periodEnd     DateTime?  @map("period_end")
+  
+  dueDate       DateTime?  @map("due_date")
+  paidAt        DateTime?  @map("paid_at")
+  
+  notes         String?    @db.Text
+  externalId    String?    @map("external_id") @db.VarChar(100)
+  
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+  
+  tenant        Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  @@index([tenantId, createdAt])
+  @@map("invoices")
+}
+
+model ContactLog {
+  id         String        @id @default(uuid()) @db.Uuid
+  tenantId   String        @map("tenant_id") @db.Uuid
+  
+  channel    ContactChannel
+  subject    String        @db.VarChar(255)
+  content    String?       @db.Text
+  status     ContactStatus @default(open)
+  
+  contactedBy   String?    @map("contacted_by") @db.Uuid
+  contactedAt   DateTime   @default(now()) @map("contacted_at")
+  
+  resolvedAt    DateTime?  @map("resolved_at")
+  
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+  
+  tenant        Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contactedByUser PlatformUser? @relation(fields: [contactedBy], references: [id])
+  
+  @@index([tenantId, createdAt])
+  @@map("contact_logs")
+}
+
+// =============================================================================
+
+// =============================================================================
+// SHIPPER ADDRESSES
+// =============================================================================
+
+model ShipperAddress {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+
+  name        String  @db.VarChar(100)
+  company     String? @db.VarChar(255)
+  street      String  @db.VarChar(255)
+  street2     String? @db.VarChar(255)
+  zip         String  @db.VarChar(20)
+  city        String  @db.VarChar(100)
+  countryCode String  @default("CH") @map("country_code") @db.Char(2)
+  phone       String? @db.VarChar(50)
+  email       String? @db.VarChar(255)
+
+  isDefault Boolean @default(false) @map("is_default")
+  isActive  Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant       Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  storeConfigs StoreShipperConfig[]
+
+  @@map("shipper_addresses")
+}
+
+model StoreShipperConfig {
+  id            String @id @default(uuid()) @db.Uuid
+  integrationId String @unique @map("integration_id") @db.Uuid
+
+  shipperAddressId   String? @map("shipper_address_id") @db.Uuid
+  defaultServiceId   String? @map("default_service_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  integration    Integration     @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  shipperAddress ShipperAddress? @relation(fields: [shipperAddressId], references: [id])
+  defaultService CarrierService? @relation(fields: [defaultServiceId], references: [id])
+
+  @@map("store_shipper_configs")
 }

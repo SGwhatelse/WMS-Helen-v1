@@ -58,8 +58,9 @@ export default function DashboardLayout({
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [tenant, setTenant] = useState<Tenant | null>(null)
+  const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
+useEffect(() => {
     fetch('/api/auth/me', { credentials: 'include' })
       .then(res => {
         if (!res.ok) throw new Error('Not authenticated')
@@ -68,12 +69,12 @@ export default function DashboardLayout({
       .then(data => {
         setUser(data.user)
         setTenant(data.tenant)
+        setLoading(false)
       })
       .catch(() => {
         router.push('/auth/login')
       })
   }, [router])
-
   const handleLogout = async () => {
     await fetch('/api/auth/logout', {
       method: 'POST',
@@ -81,7 +82,13 @@ export default function DashboardLayout({
     })
     router.push('/auth/login')
   }
-
+if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    )
+  }
   return (
     <div className="min-h-screen bg-gray-900">
       {sidebarOpen && (
