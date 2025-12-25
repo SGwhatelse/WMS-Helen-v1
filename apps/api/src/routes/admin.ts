@@ -929,6 +929,203 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     await prisma.location.delete({ where: { id } })
 return { success: true }
   })
+// =============================================================================
+  // CARRIERS
+  // =============================================================================
+
+  // GET /api/admin/carriers
+  app.get('/carriers', {
+    preHandler: requirePermission(PermissionAction.TENANTS_READ)
+  }, async (request, reply) => {
+    const carriers = await prisma.carrier.findMany({
+      include: {
+        services: {
+          orderBy: { sortOrder: 'asc' }
+        }
+      },
+      orderBy: { name: 'asc' }
+    })
+
+    return { data: carriers }
+  })
+
+  // GET /api/admin/carriers/:id
+  app.get('/carriers/:id', {
+    preHandler: requirePermission(PermissionAction.TENANTS_READ)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+
+    const carrier = await prisma.carrier.findUnique({
+      where: { id },
+      include: {
+        services: {
+          orderBy: { sortOrder: 'asc' }
+        }
+      }
+    })
+
+    if (!carrier) {
+      return reply.status(404).send({ error: 'Carrier not found' })
+    }
+
+    return carrier
+  })
+
+  // PATCH /api/admin/carriers/:id
+  app.patch('/carriers/:id', {
+    preHandler: requirePermission(PermissionAction.TENANTS_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    const carrier = await prisma.carrier.update({
+      where: { id },
+      data
+    })
+
+    return carrier
+  })
+
+  // PATCH /api/admin/carrier-services/:id
+  app.patch('/carrier-services/:id', {
+    preHandler: requirePermission(PermissionAction.TENANTS_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    const service = await prisma.carrierService.update({
+      where: { id },
+      data
+    })
+
+    return service
+  })
+// =============================================================================
+  // SHIPPER ADDRESSES
+  // =============================================================================
+
+  // GET /api/admin/shipper-addresses
+  app.get('/shipper-addresses', {
+    preHandler: requirePermission(PermissionAction.TENANTS_READ)
+  }, async (request, reply) => {
+    const { tenantId } = request.query as { tenantId?: string }
+
+    const where = tenantId ? { tenantId } : {}
+
+    const shippers = await prisma.shipperAddress.findMany({
+      where,
+      include: {
+        tenant: { select: { id: true, name: true } }
+      },
+      orderBy: [{ tenant: { name: 'asc' } }, { isDefault: 'desc' }, { name: 'asc' }]
+    })
+
+    return { data: shippers }
+  })
+
+  // POST /api/admin/shipper-addresses
+  app.post('/shipper-addresses', {
+    preHandler: requirePermission(PermissionAction.TENANTS_UPDATE)
+  }, async (request, reply) => {
+    const data = request.body as any
+
+    // If setting as default, unset other defaults for this tenant
+    if (data.isDefault) {
+      await prisma.shipperAddress.updateMany({
+        where: { tenantId: data.tenantId, isDefault: true },
+        data: { isDefault: false }
+      })
+    }
+
+    const shipper = await prisma.shipperAddress.create({
+      data: {
+        tenantId: data.tenantId,
+        name: data.name,
+        company: data.company || null,
+        street: data.street,
+        street2: data.street2 || null,
+        zip: data.zip,
+        city: data.city,
+        countryCode: data.countryCode || 'CH',
+        phone: data.phone || null,
+        email: data.email || null,
+        isDefault: data.isDefault || false,
+        isActive: true,
+      },
+      include: {
+        tenant: { select: { id: true, name: true } }
+      }
+    })
+
+    return shipper
+  })
+
+  // PATCH /api/admin/shipper-addresses/:id
+  app.patch('/shipper-addresses/:id', {
+    preHandler: requirePermission(PermissionAction.TENANTS_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+    const data = request.body as any
+
+    // Get current shipper to find tenantId
+    const current = await prisma.shipperAddress.findUnique({ where: { id } })
+    if (!current) {
+      return reply.status(404).send({ error: 'Shipper not found' })
+    }
+
+    // If setting as default, unset other defaults for this tenant
+    if (data.isDefault) {
+      await prisma.shipperAddress.updateMany({
+        where: { tenantId: current.tenantId, isDefault: true, id: { not: id } },
+        data: { isDefault: false }
+      })
+    }
+
+    const shipper = await prisma.shipperAddress.update({
+      where: { id },
+      data: {
+        name: data.name,
+        company: data.company || null,
+        street: data.street,
+        street2: data.street2 || null,
+        zip: data.zip,
+        city: data.city,
+        countryCode: data.countryCode,
+        phone: data.phone || null,
+        email: data.email || null,
+        isDefault: data.isDefault,
+      },
+      include: {
+        tenant: { select: { id: true, name: true } }
+      }
+    })
+
+    return shipper
+  })
+
+  // DELETE /api/admin/shipper-addresses/:id
+  app.delete('/shipper-addresses/:id', {
+    preHandler: requirePermission(PermissionAction.TENANTS_UPDATE)
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string }
+
+    // Check if used in any store config
+    const usedCount = await prisma.storeShipperConfig.count({
+      where: { shipperAddressId: id }
+    })
+
+    if (usedCount > 0) {
+      return reply.status(400).send({ 
+        error: 'Absender wird noch verwendet',
+        message: 'Dieser Absender ist noch einem Store zugewiesen.'
+      })
+    }
+
+    await prisma.shipperAddress.delete({ where: { id } })
+
+    return { success: true }
+  })
+
 }
 
 export default adminRoutes

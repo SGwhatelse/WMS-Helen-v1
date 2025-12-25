@@ -612,18 +612,21 @@ model WarehouseUserAssignment {
   id          String @id @default(uuid()) @db.Uuid
   warehouseId String @map("warehouse_id") @db.Uuid
   userId      String @map("user_id") @db.Uuid
-  
+
   isPrimary Boolean @default(false) @map("is_primary")
-  
+
   warehouse Warehouse  @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
   user      TenantUser @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+
   @@unique([warehouseId, userId])
   @@map("warehouse_user_assignments")
 }
 
-  id String @id @default(uuid()) @db.Uuid
-  model Carrier {
+// =============================================================================
+// CARRIERS
+// =============================================================================
+
+model Carrier {
   id String @id @default(uuid()) @db.Uuid
 
   name        String  @db.VarChar(100)
@@ -648,9 +651,8 @@ model WarehouseUserAssignment {
 
   @@map("carriers")
 }
-}
 
-  model CarrierService {
+model CarrierService {
   id        String @id @default(uuid()) @db.Uuid
   carrierId String @map("carrier_id") @db.Uuid
 
@@ -676,7 +678,6 @@ model WarehouseUserAssignment {
   @@map("carrier_services")
 }
 
-// =============================================================================
 // PRODUCTS & INVENTORY
 // =============================================================================
 
